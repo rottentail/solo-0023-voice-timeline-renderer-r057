@@ -41,7 +41,7 @@ func (s *Service) CreateTimeline(ctx context.Context, id string, request Timelin
 		if _, exists := sources[span.SourceID]; exists {
 			continue
 		}
-		asset, err := s.repo.GetSourceMeta(span.SourceID)
+		asset, _, err := s.repo.GetSource(span.SourceID)
 		if err != nil {
 			if appErr := domain.AsAppError(err); appErr.Kind == domain.KindNotFound {
 				return domain.Timeline{}, false, domain.E(

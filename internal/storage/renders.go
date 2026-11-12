@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -31,6 +33,9 @@ func (repo *Repository) GetJob(id string) (domain.RenderJob, error) {
 	return job, nil
 }
 
+// CommitRenderArtifacts publishes the output and its receipt together. Both
+// files are written into a staging directory and installed with one rename,
+// so a failure while writing either file leaves no visible render at all.
 func (repo *Repository) CommitRenderArtifacts(id string, wav []byte, receipt domain.RenderReceipt) error {
 	repo.mu.Lock()
 	defer repo.mu.Unlock()
@@ -39,9 +44,6 @@ func (repo *Repository) CommitRenderArtifacts(id string, wav []byte, receipt dom
 		return domain.E(domain.KindConflict, "render_conflict", "render_id", "render artifacts already exist")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return domain.Wrap(domain.KindInternal, "storage_error", "", "cannot inspect render destination", err)
-	}
-	if len(wav) <= 4096 {
-		return repo.commitCompactRender(final, wav, receipt)
 	}
 
 	temp, err := os.MkdirTemp(repo.path("tmp"), "render-*")
@@ -61,6 +63,7 @@ func (repo *Repository) CommitRenderArtifacts(id string, wav []byte, receipt dom
 		return domain.Wrap(domain.KindInternal, "storage_error", "", "cannot commit render artifacts", err)
 	}
 	if err := syncDirectory(repo.path("renders")); err != nil {
+		_ = os.RemoveAll(final)
 		return domain.Wrap(domain.KindInternal, "storage_error", "", "cannot sync render index", err)
 	}
 	return nil
@@ -83,26 +86,11 @@ func (repo *Repository) GetRenderOutput(id string) ([]byte, domain.RenderReceipt
 		}
 		return nil, domain.RenderReceipt{}, domain.Wrap(domain.KindInternal, "storage_error", "", "cannot read render output", err)
 	}
+	// A completed render is only resolvable when the published bytes are
+	// exactly the bytes the receipt describes.
+	digest := sha256.Sum256(payload)
+	if hex.EncodeToString(digest[:]) != receipt.Output.Digest || int64(len(payload)) != receipt.Output.ByteCount {
+		return nil, domain.RenderReceipt{}, domain.E(domain.KindInternal, "render_integrity_error", "render_id", "published render does not match its receipt")
+	}
 	return payload, receipt, nil
-}
-
-func (repo *Repository) commitCompactRender(final string, wav []byte, receipt domain.RenderReceipt) error {
-	if err := os.Mkdir(final, 0o750); err != nil {
-		return domain.Wrap(domain.KindInternal, "storage_error", "", "cannot reserve render directory", err)
-	}
-	outputPath := filepath.Join(final, "output.wav")
-	if err := writeBytes(outputPath, wav, 0o640); err != nil {
-		return domain.Wrap(domain.KindInternal, "storage_error", "", "cannot write render output", err)
-	}
-	receiptPath := filepath.Join(final, "receipt.json")
-	if err := writeJSONAtomic(receiptPath, receipt, 0o640); err != nil {
-		return domain.Wrap(domain.KindInternal, "storage_error", "", "cannot write render receipt", err)
-	}
-	if err := syncDirectory(final); err != nil {
-		return domain.Wrap(domain.KindInternal, "storage_error", "", "cannot sync render directory", err)
-	}
-	if err := syncDirectory(repo.path("renders")); err != nil {
-		return domain.Wrap(domain.KindInternal, "storage_error", "", "cannot sync render index", err)
-	}
-	return nil
 }

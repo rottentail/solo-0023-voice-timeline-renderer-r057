@@ -79,7 +79,10 @@ func (s *Service) GetSource(ctx context.Context, id string) (domain.SourceAsset,
 	if err := ctx.Err(); err != nil {
 		return domain.SourceAsset{}, err
 	}
-	return s.repo.GetSourceMeta(id)
+	// Only a source whose media was fully committed is visible; a leftover
+	// from an interrupted registration is reported as missing.
+	asset, _, err := s.repo.GetSource(id)
+	return asset, err
 }
 
 func (s *Service) GetTimeline(ctx context.Context, id string) (domain.Timeline, error) {

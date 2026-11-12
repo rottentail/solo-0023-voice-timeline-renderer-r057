@@ -35,13 +35,16 @@ func (s *Service) CreateSource(ctx context.Context, id string, request SourceWri
 	digestBytes := sha256.Sum256(payload)
 	digest := hex.EncodeToString(digestBytes[:])
 
-	existing, getErr := s.repo.GetSourceMeta(id)
+	// Registration is idempotent only for a source that was fully committed.
+	// A directory left behind by an interrupted write carries no usable media,
+	// so it must not turn a legitimate retry into a conflict.
+	existing, _, getErr := s.repo.GetSource(id)
 	if getErr == nil {
-		if existing.Digest != digest || existing.Name != request.Name {
+		if existing.Name != request.Name || existing.Digest != digest {
 			return domain.SourceAsset{}, false, domain.E(domain.KindConflict, "source_conflict", "source_id", "identifier is already bound to different source content")
 		}
 		return existing, false, nil
-	} else if appErr := domain.AsAppError(getErr); appErr.Kind != domain.KindNotFound {
+	} else if appErr := domain.AsAppError(getErr); appErr.Kind != domain.KindNotFound && appErr.Detail.Code != "source_integrity_error" {
 		return domain.SourceAsset{}, false, getErr
 	}
 

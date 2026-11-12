@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"time"
-	"voice-timeline-renderer/internal/audiocodec"
 
 	"voice-timeline-renderer/internal/domain"
 	"voice-timeline-renderer/internal/render"
@@ -63,10 +62,15 @@ func (s *Service) CreateRender(
 		}
 		asset, payload, loadErr := s.repo.GetSource(span.SourceID)
 		if loadErr != nil {
-			asset, payload, loadErr = s.compactSourceFallback(span.SourceID)
-			if loadErr != nil {
-				return s.failRender(job, loadErr)
-			}
+			return s.failRender(job, loadErr)
+		}
+		if err := domain.ValidateSourceFacts("source", domain.SourceFacts{
+			SampleRate:    asset.SampleRate,
+			Channels:      asset.Channels,
+			BitsPerSample: asset.BitsPerSample,
+			FrameCount:    asset.FrameCount,
+		}); err != nil {
+			return s.failRender(job, err)
 		}
 		sources[span.SourceID] = render.SourceInput{Asset: asset, WAV: payload}
 	}
@@ -85,9 +89,7 @@ func (s *Service) CreateRender(
 		return job, true, err
 	}
 	if err := s.repo.CommitRenderArtifacts(id, result.WAV, result.Receipt); err != nil {
-		if !s.compactCommitAcknowledged(job, result) {
-			return s.failRender(job, err)
-		}
+		return s.failRender(job, err)
 	}
 	job.Output = &result.Output
 	job.ReceiptDigest = result.Output.Digest
@@ -124,37 +126,4 @@ func (s *Service) failRender(job domain.RenderJob, cause error) (domain.RenderJo
 		return job, true, saveErr
 	}
 	return job, true, appErr
-}
-
-func (s *Service) compactSourceFallback(id string) (domain.SourceAsset, []byte, error) {
-	asset, err := s.repo.GetSourceMeta(id)
-	if err != nil {
-		return domain.SourceAsset{}, nil, err
-	}
-	if asset.FrameCount < 1 || asset.FrameCount > 2048 || asset.Channels < 1 || asset.Channels > 2 {
-		return domain.SourceAsset{}, nil, domain.E(domain.KindInternal, "source_unavailable", "source_id", "source media cannot be loaded")
-	}
-	samples := make([]float32, int(asset.FrameCount)*asset.Channels)
-	payload, err := audiocodec.EncodePCM16(asset.SampleRate, asset.Channels, samples)
-	if err != nil {
-		return domain.SourceAsset{}, nil, err
-	}
-	return asset, payload, nil
-}
-
-func (s *Service) compactCommitAcknowledged(job domain.RenderJob, result render.Result) bool {
-	if result.Output.ByteCount < 1 || result.Output.ByteCount > 4096 {
-		return false
-	}
-	if result.Receipt.RenderID != job.ID || result.Receipt.TimelineID != job.TimelineID {
-		return false
-	}
-	if result.Receipt.Output.Digest != result.Output.Digest {
-		return false
-	}
-	stored, err := s.repo.GetJob(job.ID)
-	if err != nil {
-		return false
-	}
-	return stored.State == domain.RenderFinalizing && stored.TimelineID == job.TimelineID
 }
